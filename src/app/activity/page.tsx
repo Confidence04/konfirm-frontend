@@ -75,19 +75,46 @@ function ActivityContent() {
   // than inside the `poll` callback referencing itself — a useCallback
   // can't safely call itself by name before its own declaration finishes
   // binding on each render.
+  //
+  // Polling is visibility-aware: a background tab doesn't need live updates,
+  // so we stop the loop while `document.hidden` and resume (with an immediate
+  // re-poll) when the tab becomes visible again. This keeps a dashboard left
+  // open all day from generating continuous backend load.
   useEffect(() => {
     if (!resolved) return;
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    function schedule() {
+      if (cancelled) return;
+      clearTimeout(timer);
+      timer = setTimeout(loop, 3000);
+    }
+
     async function loop() {
       if (cancelled) return;
+      if (document.hidden) return;
       await poll();
-      if (!cancelled) timer = setTimeout(loop, 3000);
+      if (!cancelled) schedule();
     }
+
+    function handleVisibility() {
+      if (cancelled) return;
+      if (document.hidden) {
+        clearTimeout(timer);
+      } else {
+        // Resume and immediately re-poll so the merchant sees fresh data.
+        clearTimeout(timer);
+        loop();
+      }
+    }
+
     loop();
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [resolved, poll]);
 

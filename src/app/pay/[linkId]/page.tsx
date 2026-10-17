@@ -103,6 +103,20 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
         const body: { confirmed: boolean; payment: { tx_hash: string } | null } = await res.json();
         if (body.confirmed && body.payment) return { tx_hash: body.payment.tx_hash, muxed_id: muxedId };
       }
+      // Don't burn the bounded attempt budget while the tab is hidden —
+      // wait for the payer to actually be looking at the page again.
+      if (typeof document !== "undefined" && document.hidden) {
+        await new Promise<void>((resolve) => {
+          const onVisible = () => {
+            if (!document.hidden) {
+              document.removeEventListener("visibilitychange", onVisible);
+              resolve();
+            }
+          };
+          document.addEventListener("visibilitychange", onVisible);
+        });
+        continue;
+      }
       await new Promise((r) => setTimeout(r, intervalMs));
     }
     return null;
@@ -197,142 +211,6 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
       // path's own ambient watcher (started on page load) has no such
       // deadline, since there's no way to know when someone might finish
       // scanning.
-      const result = await pollForConfirmation(linkId, muxedId, 40, 2000);
+      c
 
-      if (result) {
-        showSuccess(result);
-      } else {
-        setStatusMsg("Your payment was sent but hasn't been confirmed on Stellar yet. This can take a few minutes on a busy network. You don't need to pay again: the merchant will see it as soon as it confirms, and you can close this page.", true);
-      }
-    } catch (err) {
-      console.error("[konfirm checkout]", err);
-      setStatusMsg(friendlyMessage(err), true);
-    } finally {
-      setConnecting(false);
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function init() {
-      const res = await fetch(`${API_BASE}/links/${linkId}/public`);
-      if (cancelled) return;
-      if (!res.ok) {
-        setLoadingText("This payment link could not be found.");
-        return;
-      }
-      const data: LinkData = await res.json();
-      setLinkData(data);
-      try {
-        sharedMuxedId.current = await reserveSessionWithRetry();
-      } catch (err) {
-        console.error("[konfirm checkout] could not reserve a payment session", err);
-        setStatusMsg(friendlyMessage(err), true);
-        setShowQr(false);
-        return;
-      }
-      // QR and mobile wallets pay the link amount. A platform fee on this
-      // link is owed by the merchant and settled from their dashboard
-      // (docs/design/qr-fee-collection.md, Option B), so it isn't added here.
-      await setupQrPayment(sharedMuxedId.current);
-      // Long, silent watch — up to 10 minutes — for the QR/mobile-wallet
-      // path, which has no "just submitted" moment to bound the wait
-      // against.
-      pollForConfirmation(linkId, sharedMuxedId.current, 300, 2000).then((result) => {
-        if (result) showSuccess(result);
-      });
-    }
-
-    init();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linkId]);
-
-  function formatCurrency(value: string, currency: string): string {
-    const str = Number(value).toFixed(2);
-    return currency === "USDC" ? `$${str}` : `${str} ${currency}`;
-  }
-
-  const amountDisplay = linkData ? formatCurrency(linkData.amount_usdc, linkData.currency) : "";
-  const feeUsdc = linkData?.fee_usdc ? Number(linkData.fee_usdc) : 0;
-  const feeDisplay = linkData && feeUsdc > 0 ? formatCurrency(linkData.fee_usdc as string, linkData.currency) : "";
-  const totalDisplay =
-    linkData && feeUsdc > 0
-      ? formatCurrency((Number(linkData.amount_usdc) + feeUsdc).toString(), linkData.currency)
-      : "";
-
-  return (
-    <div className="page-center">
-      <div className="card">
-        <div className="brand" style={{ marginBottom: 24 }}>
-          <span className="mark">✓</span> Konfirm
-        </div>
-
-        {!linkData && !confirmed && <div>{loadingText}</div>}
-
-        {linkData && !confirmed && (
-          <div>
-            <div className="merchant-label">{linkData.merchant_name}</div>
-            <div className="desc-label">{linkData.description || "Payment"}</div>
-            {feeUsdc > 0 ? (
-              <>
-                <div className="amount-display">{totalDisplay}</div>
-                <div className="sub" style={{ marginTop: -8, marginBottom: 16 }}>
-                  {amountDisplay} + {feeDisplay} fee
-                </div>
-              </>
-            ) : (
-              <div className="amount-display">{amountDisplay}</div>
-            )}
-
-            {showQr && (
-              <>
-                <div className="qr-section">
-                  <div className="qr-label">Scan with your Stellar wallet</div>
-                  {feeUsdc > 0 && (
-                    <div className="sub" style={{ marginBottom: 8 }}>
-                      Pay {amountDisplay} from your wallet. The platform fee is settled by the merchant.
-                    </div>
-                  )}
-                  <a
-                    className="qr-box"
-                    href={qrUri}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    dangerouslySetInnerHTML={{ __html: qrSvg }}
-                  />
-                  <div className="qr-hint">Lobstr, Vibrant, Beans, xBull, and others</div>
-                </div>
-                <div className="divider">or</div>
-              </>
-            )}
-
-            <button type="button" className="primary" disabled={connecting} onClick={handleConnect}>
-              Connect Freighter &amp; Pay
-            </button>
-            <div className={`status${statusIsError ? " error" : ""}`}>{status}</div>
-          </div>
-        )}
-
-        {confirmed && (
-          <div className="success-box">
-            <div className="tick">✓</div>
-            <div className="success-title">Konfirmed</div>
-            <div className="success-detail">Your payment landed and was konfirmed on-chain.</div>
-            <a
-              className="txlink"
-              href={`https://stellar.expert/explorer/testnet/tx/${confirmed.tx_hash}`}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              View on stellar.expert →
-            </a>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+/* … truncated 5176 chars — edit only what you need near the top … */
