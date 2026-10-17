@@ -83,7 +83,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             <div key={group.label} className="admin-sidebar-group">
               <div className="admin-sidebar-group-label">{group.label}</div>
               {group.items.map((item) => (
-                <Link key={item.href} href={item.href} className={pathname === item.href ? "active" : ""}>
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={pathname === item.href ? "active" : ""}
+                  aria-current={pathname === item.href ? "page" : undefined}
+                >
                   {item.label}
                 </Link>
               ))}
