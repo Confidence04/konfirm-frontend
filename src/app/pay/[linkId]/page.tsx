@@ -1,6 +1,8 @@
 "use client";
 
 import { use, useEffect, useRef, useState } from "react";
+import freighterApi from "@stellar/freighter-api";
+import { TransactionBuilder, Networks } from "@stellar/stellar-sdk";
 import qrcode from "qrcode-generator";
 import { API_BASE } from "@/lib/api";
 import { formatAmount } from "@/lib/format";
@@ -62,10 +64,50 @@ function randomMuxedId(): string {
   return ((high << 32n) | low).toString();
 }
 
-export const metadata: Metadata = {
-  title: "Checkout",
-  robots: { index: false, follow: false },
-};
+// Decodes the backend-supplied XDR and cross-checks it against what this
+// page already showed the payer. The prepare-tx endpoint is a different
+// request from the one that produced the displayed amount/merchant, so
+// without this check a compromised or buggy backend could swap the
+// destination or amount and the payer would never know. Fails closed.
+function verifyPreparedXdr(
+  xdr: string,
+  networkPassphrase: string,
+  expected: { destination: string; amount: string },
+): void {
+  let tx;
+  try {
+    tx = TransactionBuilder.fromXDR(xdr, networkPassphrase || Networks.TESTNET);
+  } catch (err) {
+    console.error("[konfirm checkout] could not decode prepared XDR", err);
+    throw new Error("We couldn't verify this payment before signing. Please try again.");
+  }
+
+  const ops = "operations" in tx ? tx.operations : [];
+  const paymentOp = ops.find((op) => op.type === "payment");
+  if (!paymentOp || paymentOp.type !== "payment") {
+    throw new Error("We couldn't verify this payment before signing. Please try again.");
+  }
+
+  const opDestination = paymentOp.destination;
+  const opAmount = paymentOp.amount;
+  const expectedAmount = Number(expected.amount);
+  const opAmountNum = Number(opAmount);
+
+  const destinationMatches = opDestination === expected.destination;
+  const amountMatches =
+    Number.isFinite(expectedAmount) &&
+    Number.isFinite(opAmountNum) &&
+    Math.abs(opAmountNum - expectedAmount) < 1e-7;
+
+  if (!destinationMatches || !amountMatches) {
+    console.error("[konfirm checkout] prepared XDR does not match displayed details", {
+      expected,
+      opDestination,
+      opAmount,
+    });
+    throw new Error("This payment doesn't match what we showed you. For your safety, we stopped before signing.");
+  }
+}
 
 export default function CheckoutPage({ params }: { params: Promise<{ linkId: string }> }) {
   const { linkId } = use(params);
@@ -191,6 +233,15 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
       const prep = await prepRes.json();
       if (!prepRes.ok) throw new Error(prep.message || "could not prepare transaction");
 
+      // Cross-check the prepared XDR against the amount/merchant this page
+      // already displayed before handing it to the wallet. Fails closed.
+      if (linkData) {
+        verifyPreparedXdr(prep.xdr, prep.network_passphrase, {
+          destination: linkData.stellar_base_address,
+          amount: linkData.amount_usdc,
+        });
+      }
+
       setStatusMsg(STAGE.SIGN);
       const signed = await freighterApi.signTransaction(prep.xdr, {
         networkPassphrase: prep.network_passphrase,
@@ -220,117 +271,6 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
       // path's own ambient watcher (started on page load) has no such
       // deadline, since there's no way to know when someone might finish
       // scanning.
-      const payment = await pollForConfirmation(linkId, muxedId, 20, 1500);
-      if (payment) {
-        showSuccess(payment);
-      } else {
-        setStatusMsg("Your payment was sent. It may take a moment to show up here.");
-      }
-    } catch (err) {
-      console.error("[konfirm checkout] connect flow failed", err);
-      setStatusMsg(friendlyMessage(err), true);
-    } finally {
-      operationInFlight.current = false;
-      connectInFlight.current = false;
-      setConnecting(false);
-    }
-  }
+      c
 
-  function handleConnectSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (connecting) return;
-    void handleConnect();
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    async function init() {
-      try {
-        const res = await fetch(`${API_BASE}/links/${linkId}`);
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.message || "link not found");
-        if (cancelled) return;
-        setLinkData(body);
-
-        const muxedId = await reserveSessionWithRetry();
-        if (cancelled) return;
-        sharedMuxedId.current = muxedId;
-
-        await setupQrPayment(muxedId);
-        if (cancelled) return;
-
-        // Ambient watcher for the QR path — no deadline, since the payer
-        // may scan at any time.
-        void (async () => {
-          const payment = await pollForConfirmation(linkId, muxedId, 120, 3000);
-          if (payment) showSuccess(payment);
-        })();
-      } catch (err) {
-        console.error("[konfirm checkout] init failed", err);
-        if (!cancelled) setLoadingText(friendlyMessage(err));
-      }
-    }
-    void init();
-    return () => {
-      cancelledRef.current = true;
-      channel?.close();
-      broadcastRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linkId]);
-
-  if (!linkData) {
-    return (
-      <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center gap-4 p-6">
-        <p className="text-sm text-gray-500">{loadingText}</p>
-      </main>
-    );
-  }
-
-  if (confirmed) {
-    return (
-      <main className="mx-auto flex min-h-screen max-w-md flex-col items-center justify-center gap-4 p-6">
-        <h1 className="text-2xl font-semibold">Payment confirmed</h1>
-        <p className="text-sm text-gray-500">
-          Thanks — your payment to {linkData.merchant_name} went through.
-        </p>
-        <p className="break-all text-xs text-gray-400">tx: {confirmed.tx_hash}</p>
-      </main>
-    );
-  }
-
-  return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col gap-6 p-6">
-      <header className="flex flex-col gap-1">
-        <p className="text-sm text-gray-500">Pay {linkData.merchant_name}</p>
-        <h1 className="text-2xl font-semibold">
-          {linkData.amount_usdc} {linkData.currency}
-        </h1>
-        {linkData.description && <p className="text-sm text-gray-500">{linkData.description}</p>}
-      </header>
-
-      {showQr && qrSvg && (
-        <section className="flex flex-col items-center gap-2">
-          <div className="rounded-lg bg-white p-2" dangerouslySetInnerHTML={{ __html: qrSvg }} />
-          <a href={qrUri} className="text-xs text-blue-600 underline">
-            Open in your wallet
-          </a>
-        </section>
-      )}
-
-      <form onSubmit={handleConnectSubmit} className="flex flex-col gap-3">
-        <button
-          type="submit"
-          disabled={connecting}
-          className="rounded-lg bg-black px-4 py-2 text-white disabled:opacity-50"
-        >
-          {connecting ? "Connecting…" : "Connect wallet & pay"}
-        </button>
-      </form>
-
-      {status && (
-        <p className={`text-sm ${statusIsError ? "text-red-600" : "text-gray-500"}`}>{status}</p>
-      )}
-    </main>
-  );
-}
+/* … truncated 5176 chars — edit only what you need near the top … */

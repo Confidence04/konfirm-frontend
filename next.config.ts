@@ -10,7 +10,38 @@ import type { NextConfig } from "next";
 // direct cross-origin calls from the client to NestJS.
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:4001";
 
+// Baseline security response headers applied to every route. Framing is
+// locked down (CSP frame-ancestors + X-Frame-Options fallback) so the admin
+// dashboard can't be clickjacked; nosniff and a strict referrer policy round
+// out the safe, non-breaking set. A full CSP is intentionally out of scope.
+const securityHeaders = [
+  {
+    key: "Content-Security-Policy",
+    value: "frame-ancestors 'none'",
+  },
+  {
+    key: "X-Frame-Options",
+    value: "DENY",
+  },
+  {
+    key: "X-Content-Type-Options",
+    value: "nosniff",
+  },
+  {
+    key: "Referrer-Policy",
+    value: "strict-origin-when-cross-origin",
+  },
+];
+
 const nextConfig: NextConfig = {
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: securityHeaders,
+      },
+    ];
+  },
   async rewrites() {
     return [
       {

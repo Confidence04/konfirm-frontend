@@ -36,7 +36,13 @@ function dayLabel(dateStr: string): string {
 // A small hand-rolled SVG area chart — this app has no charting dependency,
 // and one 7-point series doesn't need one. Real values in, real path out;
 // nothing here is decorative.
-function VolumeChart({ points }: { points: { date: string; net_usdc: string }[] }) {
+function VolumeChart({
+  points,
+  totalUsdc,
+}: {
+  points: { date: string; net_usdc: string }[];
+  totalUsdc: string;
+}) {
   const width = 640;
   const height = 160;
   const padding = 8;
@@ -53,14 +59,11 @@ function VolumeChart({ points }: { points: { date: string; net_usdc: string }[] 
   const linePath = coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x},${y}`).join(" ");
   const areaPath = `${linePath} L${coords[coords.length - 1][0]},${height} L${coords[0][0]},${height} Z`;
 
-  const summary =
-    points.length === 0
-      ? "No volume data for the last 7 days."
-      : `Payment volume over the last ${points.length} days, from ${formatUsd(
-          points[0].net_usdc,
-        )} on ${dayLabel(points[0].date)} to ${formatUsd(
-          points[points.length - 1].net_usdc,
-        )} on ${dayLabel(points[points.length - 1].date)}.`;
+  const firstDate = points[0]?.date;
+  const lastDate = points[points.length - 1]?.date;
+  const rangeLabel =
+    firstDate && lastDate ? `${firstDate} to ${lastDate}` : "last 7 days";
+  const ariaLabel = `Payment volume chart, ${rangeLabel}: ${formatUsd(totalUsdc)} total net USDC across ${points.length} days.`;
 
   return (
     <svg
@@ -68,7 +71,7 @@ function VolumeChart({ points }: { points: { date: string; net_usdc: string }[] 
       className="volume-chart"
       preserveAspectRatio="none"
       role="img"
-      aria-label={summary}
+      aria-label={ariaLabel}
     >
       <path d={areaPath} className="volume-chart-fill" />
       <path d={linePath} className="volume-chart-line" />
@@ -169,9 +172,11 @@ export default function AdminOverviewPage() {
       <div className="admin-section">
         <h2>Payment volume, last 7 days ({formatAmount(stats.payments.last_7d_net_usdc, "USDC")} total)</h2>
         <div className="chart-card">
-          <VolumeChart points={stats.daily_volume} />
-          <VolumeTable points={stats.daily_volume} />
-          <div className="chart-labels" aria-hidden="true">
+          <VolumeChart
+            points={stats.daily_volume}
+            totalUsdc={stats.payments.last_7d_net_usdc}
+          />
+          <div className="chart-labels">
             {stats.daily_volume.map((p) => (
               <span key={p.date}>{dayLabel(p.date)}</span>
             ))}
