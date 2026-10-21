@@ -2,8 +2,10 @@
 
 import { use, useEffect, useRef, useState } from "react";
 import freighterApi from "@stellar/freighter-api";
+import { TransactionBuilder, Networks } from "@stellar/stellar-sdk";
 import qrcode from "qrcode-generator";
 import { API_BASE } from "@/lib/api";
+import { formatAmount } from "@/lib/format";
 
 const HORIZON_URL = "https://horizon-testnet.stellar.org";
 
@@ -41,7 +43,9 @@ function friendlyMessage(err: unknown): string {
     "this address is not permitted to pay",
     "pay-what-you-want links need an amount",
   ];
-  if (knownSafe.some((s) => msg.toLowerCase().includes(s))) return msg;
+  if (knownSafe.some((s) => msg.toLowerCase().includes(s))) {
+    return "This payment link isn't available right now. Please contact the merchant.";
+  }
   if (msg.toLowerCase().includes("declined") || msg.toLowerCase().includes("rejected")) {
     return "You'll need to approve the payment in your wallet to continue.";
   }
@@ -60,6 +64,51 @@ function randomMuxedId(): string {
   return ((high << 32n) | low).toString();
 }
 
+// Decodes the backend-supplied XDR and cross-checks it against what this
+// page already showed the payer. The prepare-tx endpoint is a different
+// request from the one that produced the displayed amount/merchant, so
+// without this check a compromised or buggy backend could swap the
+// destination or amount and the payer would never know. Fails closed.
+function verifyPreparedXdr(
+  xdr: string,
+  networkPassphrase: string,
+  expected: { destination: string; amount: string },
+): void {
+  let tx;
+  try {
+    tx = TransactionBuilder.fromXDR(xdr, networkPassphrase || Networks.TESTNET);
+  } catch (err) {
+    console.error("[konfirm checkout] could not decode prepared XDR", err);
+    throw new Error("We couldn't verify this payment before signing. Please try again.");
+  }
+
+  const ops = "operations" in tx ? tx.operations : [];
+  const paymentOp = ops.find((op) => op.type === "payment");
+  if (!paymentOp || paymentOp.type !== "payment") {
+    throw new Error("We couldn't verify this payment before signing. Please try again.");
+  }
+
+  const opDestination = paymentOp.destination;
+  const opAmount = paymentOp.amount;
+  const expectedAmount = Number(expected.amount);
+  const opAmountNum = Number(opAmount);
+
+  const destinationMatches = opDestination === expected.destination;
+  const amountMatches =
+    Number.isFinite(expectedAmount) &&
+    Number.isFinite(opAmountNum) &&
+    Math.abs(opAmountNum - expectedAmount) < 1e-7;
+
+  if (!destinationMatches || !amountMatches) {
+    console.error("[konfirm checkout] prepared XDR does not match displayed details", {
+      expected,
+      opDestination,
+      opAmount,
+    });
+    throw new Error("This payment doesn't match what we showed you. For your safety, we stopped before signing.");
+  }
+}
+
 export default function CheckoutPage({ params }: { params: Promise<{ linkId: string }> }) {
   const { linkId } = use(params);
 
@@ -72,9 +121,16 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
   const [statusIsError, setStatusIsError] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [confirmed, setConfirmed] = useState<ConfirmedPayment | null>(null);
+  const [linkInactive, setLinkInactive] = useState(false);
 
   const alreadyConfirmed = useRef(false);
   const sharedMuxedId = useRef<string | null>(null);
+  const broadcastRef = useRef<BroadcastChannel | null>(null);
+  // True only while a payment is being signed/submitted/confirmed, so the
+  // beforeunload prompt never fires during passive polling or idle states.
+  const operationInFlight = useRef(false);
+  useBeforeUnload(operationInFlight);
+  const connectInFlight = useRef(false);
 
   function setStatusMsg(msg: string, isError = false) {
     setStatus(msg);
@@ -85,6 +141,7 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
     if (alreadyConfirmed.current) return; // either path can win; only act on the first
     alreadyConfirmed.current = true;
     setConfirmed(payment);
+    broadcastRef.current?.postMessage({ type: "confirmed" });
   }
 
   // Asks only about this payer's own session, so a checkout page never
@@ -97,10 +154,12 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
     intervalMs: number,
   ): Promise<ConfirmedPayment | null> {
     for (let i = 0; i < attempts; i++) {
-      if (alreadyConfirmed.current) return null;
+      if (alreadyConfirmed.current || cancelledRef.current) return null;
       const res = await fetch(`${API_BASE}/links/${pollLinkId}/sessions/${muxedId}`);
+      if (cancelledRef.current) return null;
       if (res.ok) {
         const body: { confirmed: boolean; payment: { tx_hash: string } | null } = await res.json();
+        if (cancelledRef.current) return null;
         if (body.confirmed && body.payment) return { tx_hash: body.payment.tx_hash, muxed_id: muxedId };
       }
       // Don't burn the bounded attempt budget while the tab is hidden —
@@ -156,18 +215,24 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
       const qr = qrcode(0, "M");
       qr.addData(body.uri);
       qr.make();
+      if (cancelledRef.current) return;
       setQrSvg(qr.createSvgTag(5, 8));
       setQrUri(body.uri);
     } catch (err) {
-      console.error("[konfirm checkout] QR setup failed", err);
+      reportError(err, { tags: { flow: "checkout", stage: "qr-setup", linkId } });
       setShowQr(false);
     }
   }
 
   async function handleConnect() {
+    if (connectInFlight.current) return;
+    connectInFlight.current = true;
     setConnecting(true);
+    operationInFlight.current = true;
+    broadcastRef.current?.postMessage({ type: "paying" });
     try {
       setStatusMsg(STAGE.CONNECT);
+      const { default: freighterApi } = await import("@stellar/freighter-api");
       const access = await freighterApi.requestAccess();
       if (access.error) throw new Error(access.error);
       const payerAddress = access.address;
@@ -181,6 +246,15 @@ export default function CheckoutPage({ params }: { params: Promise<{ linkId: str
       const prepRes = await fetch(`${API_BASE}/payments/prepare-tx?linkId=${linkId}&muxed_id=${muxedId}&payer=${payerAddress}`);
       const prep = await prepRes.json();
       if (!prepRes.ok) throw new Error(prep.message || "could not prepare transaction");
+
+      // Cross-check the prepared XDR against the amount/merchant this page
+      // already displayed before handing it to the wallet. Fails closed.
+      if (linkData) {
+        verifyPreparedXdr(prep.xdr, prep.network_passphrase, {
+          destination: linkData.stellar_base_address,
+          amount: linkData.amount_usdc,
+        });
+      }
 
       setStatusMsg(STAGE.SIGN);
       const signed = await freighterApi.signTransaction(prep.xdr, {

@@ -1,11 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { API_BASE, apiPost } from "@/lib/api";
 import { useRequireAuth } from "@/lib/useAuth";
+import { formatAmount } from "@/lib/format";
 import FeeSettlement from "@/components/fee-settlement";
+
+type PaymentStatus = "paid" | "held" | "refunded" | "disputed";
 
 interface Payment {
   id: string;
@@ -13,12 +16,30 @@ interface Payment {
   asset_code: string;
   payer_address: string;
   link_description: string | null;
-  status: "paid" | "held" | "refunded" | "disputed";
+  status: PaymentStatus;
   flag_reason: string | null;
   fee_status: "none" | "collected" | "owed" | "claimed" | "settled";
   fee_owed_raw: string | null;
   fee_asset_code: string | null;
+  created_at: string;
 }
+
+const STATUS_FILTERS: Array<{ value: "all" | PaymentStatus; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "paid", label: "Paid" },
+  { value: "held", label: "Held" },
+  { value: "refunded", label: "Refunded" },
+  { value: "disputed", label: "Disputed" },
+];
+
+type DateRangePreset = "all" | "7" | "30" | "90";
+
+const DATE_RANGE_FILTERS: Array<{ value: DateRangePreset; label: string }> = [
+  { value: "all", label: "All time" },
+  { value: "7", label: "Last 7 days" },
+  { value: "30", label: "Last 30 days" },
+  { value: "90", label: "Last 90 days" },
+];
 
 // Plain-language reasons for an admin-review hold, shown to the merchant.
 // Anything unrecognised falls back to a neutral line rather than leaking an
@@ -43,20 +64,33 @@ interface Merchant {
   stellar_base_address: string | null;
 }
 
-function formatAmount(amount: number, code: string): string {
-  return code === "USDC" ? `$${amount.toFixed(2)}` : `${amount.toFixed(2)} ${code}`;
-}
-
 // The dashboard is only ever the logged-in merchant's own data. There's no
 // address-in-the-URL view any more: the backend returns payments by session,
 // so an unauthenticated visitor sees nothing.
 function ActivityContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const isAdminPreview = Boolean(searchParams.get("admin_preview"));
   const { resolved, data: merchant } = useRequireAuth<Merchant>({
     meEndpoint: "/auth/me",
     loginPath: "/login",
     select: (body) => (body as { merchant: Merchant }).merchant,
   });
+  // Gate render on auth resolution — prevents a false "$0.00 received"
+  // from flashing before the first fetch completes (#135).
+  if (!resolved) {
+    return (
+      <div className="wrap">
+        <div className="header-row">
+          <div className="brand">
+            <span className="mark">✓</span> Konfirm
+          </div>
+        </div>
+        <div className="empty">Loading…</div>
+      </div>
+    );
+  }
+
   const hasAddress = Boolean(merchant?.stellar_base_address);
   const showNav = Boolean(merchant);
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -146,8 +180,34 @@ function ActivityContent() {
     });
   const hasBalances = Object.keys(totals).length > 0;
 
+  // Hold off rendering the dashboard shell (nav, actions, fee settlement)
+  // until the client-side auth check resolves — the edge proxy only checks
+  // cookie presence, so an expired session would otherwise briefly expose a
+  // fully interactive page.
+  if (!resolved) return null;
+
   return (
     <div className="wrap">
+      {isAdminPreview && (
+        <div
+          role="banner"
+          style={{
+            background: "var(--warn, #b45309)",
+            color: "#fff",
+            padding: "10px 16px",
+            fontWeight: 600,
+            fontSize: 13,
+            borderRadius: 6,
+            marginBottom: 16,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <span>⚠</span>
+          Admin preview — you are viewing this merchant&apos;s dashboard as an admin. This session is read-only and has been logged.
+        </div>
+      )}
       <div className="header-row">
         <div className="brand">
           <span className="mark">✓</span> Konfirm
@@ -155,7 +215,10 @@ function ActivityContent() {
         {showNav && (
           <div className="nav">
             <Link href="/new">+ New payment</Link>
+            <Link href="/links">My links</Link>
             <Link href="/cashout">Cash out</Link>
+            <Link href="/referrals">Referrals</Link>
+            <Link href="/docs">Docs</Link>
             <button type="button" onClick={handleLogout}>
               Log out
             </button>
@@ -186,41 +249,121 @@ function ActivityContent() {
           ))
         ) : (
           <>
-            $0.00 <small>received</small>
+            {formatAmount(0, "USDC")} <small>received</small>
           </>
         )}
       </div>
+      {hasAddress && payments.length > 0 && (
+        <div className="header-row" style={{ gap: 12, flexWrap: "wrap" }}>
+          <div className="field">
+            <label htmlFor="status-filter">Status</label>
+            <select
+              id="status-filter"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as "all" | PaymentStatus)}
+            >
+              {STATUS_FILTERS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="date-filter">Date range</label>
+            <select id="date-filter" value={dateFilter} onChange={(e) => setDateFilter(e.target.value as DateRangePreset)}>
+              {DATE_RANGE_FILTERS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
       <div>
-        {resolved && !hasAddress && <div className="empty">No Stellar address on file yet.</div>}
+        {!hasAddress && <div className="empty">No Stellar address on file yet.</div>}
         {hasAddress && payments.length === 0 && !pending && (
           <div className="empty">No payments yet — this updates the instant one lands.</div>
         )}
-        {payments.map((p) => (
-          <div className="payment" key={p.id}>
-            <div className="left">
-              <div className="tick">✓</div>
-              <div className="desc">
-                {p.link_description || "Payment"}
-                <div className="from">
-                  from {p.payer_address.slice(0, 4)}…{p.payer_address.slice(-4)}
+        {hasAddress && payments.length > 0 && filteredPayments.length === 0 && (
+          <div className="empty">No payments match this filter.</div>
+        )}
+        {filteredPayments.map((p) => {
+          const isExpanded = expandedId === p.id;
+          return (
+            <div
+              className="payment"
+              key={p.id}
+              role="button"
+              tabIndex={0}
+              aria-expanded={isExpanded}
+              onClick={() => setExpandedId(isExpanded ? null : p.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setExpandedId(isExpanded ? null : p.id);
+                }
+              }}
+              style={{ cursor: "pointer", flexDirection: "column", alignItems: "stretch" }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
+                <div className="left">
+                  <div className="tick">✓</div>
+                  <div className="desc">
+                    {p.link_description || "Payment"}
+                    <div className="from">
+                      from {p.payer_address.slice(0, 4)}…{p.payer_address.slice(-4)}
+                    </div>
+                    {p.fee_status === "owed" && p.fee_owed_raw && (
+                      <div className="from">
+                        Fee owed {p.fee_owed_raw} {p.fee_asset_code}
+                      </div>
+                    )}
+                    {p.status === "held" && (
+                      <div className="from" role="status">
+                        {HOLD_REASON_TEXT[p.flag_reason ?? ""] ?? HOLD_FALLBACK}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                {p.fee_status === "owed" && p.fee_owed_raw && (
-                  <div className="from">
-                    Fee owed {p.fee_owed_raw} {p.fee_asset_code}
-                  </div>
-                )}
-                {p.status === "held" && (
-                  <div className="from" role="status">
-                    {HOLD_REASON_TEXT[p.flag_reason ?? ""] ?? HOLD_FALLBACK}
-                  </div>
-                )}
+                <div className="amount">
+                  {p.status === "held" ? "On hold" : formatAmount(Number(p.net_usdc), p.asset_code)}
+                </div>
               </div>
+              {isExpanded && (
+                <div className="from" style={{ marginTop: 12, width: "100%", lineHeight: 1.8 }}>
+                  <div>
+                    <strong>Payment ID:</strong> <span className="mono">{p.id}</span>
+                  </div>
+                  <div>
+                    <strong>Status:</strong> {p.status}
+                  </div>
+                  <div>
+                    <strong>Date:</strong> {new Date(p.created_at).toLocaleString()}
+                  </div>
+                  <div>
+                    <strong>Payer address:</strong> <span className="mono">{p.payer_address}</span>
+                  </div>
+                  <div>
+                    <strong>Amount:</strong> {formatAmount(Number(p.net_usdc), p.asset_code)}
+                  </div>
+                  {p.fee_status !== "none" && (
+                    <div>
+                      <strong>Fee status:</strong> {p.fee_status}
+                      {p.fee_owed_raw && ` (${p.fee_owed_raw} ${p.fee_asset_code})`}
+                    </div>
+                  )}
+                  {p.status === "held" && (
+                    <div>
+                      <strong>Hold reason:</strong> {HOLD_REASON_TEXT[p.flag_reason ?? ""] ?? HOLD_FALLBACK}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="amount">
-              {p.status === "held" ? "On hold" : formatAmount(Number(p.net_usdc), p.asset_code)}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

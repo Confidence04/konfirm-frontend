@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import freighterApi from "@stellar/freighter-api";
+import { TransactionBuilder, Operation } from "@stellar/stellar-sdk";
 import { API_BASE } from "@/lib/api";
+import { reportError } from "@/lib/report-error";
 
 // Merchant-side fee settlement (docs/design/qr-fee-collection.md, Option B).
 // Shows what the merchant owes, then clears it in one transaction they sign in
@@ -29,13 +31,50 @@ function describeFailure(body: { message?: unknown; result_codes?: unknown }): s
   return typeof body.message === "string" ? body.message : "The settlement couldn't be completed. Please try again.";
 }
 
+// Decode the backend-supplied XDR and confirm every payment operation matches
+// the owed totals already shown to the merchant. Fails closed on any mismatch
+// so a compromised or buggy backend can't redirect the settlement.
+function verifySettlementXdr(xdr: string, networkPassphrase: string, owed: OwedTotal[]): void {
+  const tx = TransactionBuilder.fromXDR(xdr, networkPassphrase);
+  const ops = "operations" in tx ? tx.operations : [];
+  const expected = new Map<string, number>();
+  for (const t of owed) {
+    const key = `${t.asset_code}:${t.asset_issuer ?? ""}`;
+    expected.set(key, (expected.get(key) ?? 0) + Number(t.amount));
+  }
+  const seen = new Map<string, number>();
+  for (const op of ops) {
+    if (op.type !== "payment") {
+      throw new Error("The fee payment contains an unexpected operation. Nothing was signed.");
+    }
+    const payment = op as Operation.Payment;
+    const asset = payment.asset;
+    const code = asset.isNative() ? "XLM" : asset.getCode();
+    const issuer = asset.isNative() ? "" : asset.getIssuer();
+    const key = `${code}:${issuer}`;
+    seen.set(key, (seen.get(key) ?? 0) + Number(payment.amount));
+  }
+  if (seen.size !== expected.size) {
+    throw new Error("The fee payment doesn't match the fees shown. Nothing was signed.");
+  }
+  for (const [key, amount] of expected) {
+    const got = seen.get(key);
+    if (got === undefined || Math.abs(got - amount) > 1e-7) {
+      throw new Error("The fee payment doesn't match the fees shown. Nothing was signed.");
+    }
+  }
+}
+
 export default function FeeSettlement({ address }: { address: string }) {
   const [totals, setTotals] = useState<OwedTotal[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ text: string; error: boolean } | null>(null);
 
+  // Always-fresh reads: this is a balance check (fees owed), so a
+  // cached/stale response could understate or overstate what's actually
+  // owed right now.
   const load = useCallback(async () => {
-    const res = await fetch(`${API_BASE}/fees/owed`);
+    const res = await fetch(`${API_BASE}/fees/owed`, { cache: "no-store" });
     if (res.ok) {
       const body: { totals: OwedTotal[] } = await res.json();
       setTotals(body.totals);
@@ -43,17 +82,8 @@ export default function FeeSettlement({ address }: { address: string }) {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch(`${API_BASE}/fees/owed`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body: { totals: OwedTotal[] } | null) => {
-        if (!cancelled && body) setTotals(body.totals);
-      })
-      .catch((err) => console.error("[konfirm fees] could not load owed fees", err));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    load().catch((err) => console.error("[konfirm fees] could not load owed fees", err));
+  }, [load]);
 
   async function settle() {
     setBusy(true);
@@ -63,7 +93,17 @@ export default function FeeSettlement({ address }: { address: string }) {
       const body = await created.json().catch(() => ({}));
       if (!created.ok) throw Object.assign(new Error(describeFailure(body)), { handled: true });
 
+      try {
+        verifySettlementXdr(body.unsigned_xdr, body.network_passphrase, totals ?? []);
+      } catch (err) {
+        throw Object.assign(
+          new Error(err instanceof Error ? err.message : "The fee payment couldn't be verified. Nothing was signed."),
+          { handled: true },
+        );
+      }
+
       setStatus({ text: "Approve the fee payment in your wallet…", error: false });
+      const { default: freighterApi } = await import("@stellar/freighter-api");
       const signed = await freighterApi.signTransaction(body.unsigned_xdr, {
         networkPassphrase: body.network_passphrase,
         address,
@@ -80,9 +120,11 @@ export default function FeeSettlement({ address }: { address: string }) {
       if (!submitted.ok) throw Object.assign(new Error(describeFailure(result)), { handled: true });
 
       setStatus({ text: "Fees settled. Thank you.", error: false });
-      await load();
+      await load().catch((refreshErr) => {
+        console.warn("[konfirm fees] totals refresh failed after successful settlement", refreshErr);
+      });
     } catch (err) {
-      console.error("[konfirm fees] settlement failed", err);
+      reportError(err, { tags: { area: "fee-settlement", action: "settle" } });
       setStatus({
         text: err instanceof Error && (err as Error & { handled?: boolean }).handled
           ? err.message

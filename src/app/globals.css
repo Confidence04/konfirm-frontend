@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --ink: #0a0908;
   --surface: #17140f;
   --surface-2: #1e1a14;
@@ -25,9 +26,14 @@ body {
 
 body {
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--ink);
   color: var(--text-hi);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 /* Centered single-card pages (login, signup, new, pay, cashout, get-test-usdc) */
@@ -36,6 +42,7 @@ body {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
+  min-height: 100dvh;
   padding: 24px;
 }
 
@@ -121,6 +128,11 @@ label {
 .footer a {
   color: var(--accent);
   text-decoration: none;
+  display: inline-block;
+  min-height: 24px;
+  min-width: 24px;
+  padding: 4px 2px;
+  line-height: 16px;
 }
 .footer a:hover {
   text-decoration: underline;
@@ -184,12 +196,16 @@ select:focus {
 button {
   width: 100%;
   padding: 14px;
+  min-height: 48px;
   border-radius: 999px;
   border: none;
   font-size: 15px;
   font-weight: 700;
   cursor: pointer;
   font-family: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 button.primary {
@@ -209,6 +225,17 @@ button.secondary {
   margin-top: 10px;
 }
 
+/*
+ * Shared status / error message region (issue #45).
+ *
+ * Every form renders its feedback in a `.status` element. For screen readers
+ * to announce changes, the element must be a live region that already exists
+ * in the DOM before its text changes. Pages add `role="alert"` (or
+ * `aria-live="assertive"` for errors / `"polite"` for status) to the element;
+ * this rule keeps it rendered (min-height, never display:none / visibility:
+ * hidden / content collapsed) so the live region is present and observable
+ * even while empty.
+ */
 .status {
   font-size: 14px;
   color: var(--text-lo);
@@ -218,6 +245,13 @@ button.secondary {
 }
 .status.error {
   color: var(--error);
+}
+/* Never hide the live region: keep it in the accessibility tree at all times. */
+.status[aria-live],
+.status[role="alert"],
+.status[role="status"] {
+  display: block;
+  visibility: visible;
 }
 
 .hidden {
@@ -233,6 +267,10 @@ button.secondary {
 }
 .ctoggle {
   width: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   padding: 8px 20px;
   border-radius: 999px;
   border: 1px solid var(--border);
@@ -255,6 +293,24 @@ button.secondary {
   font-size: 12.5px;
   color: var(--text-faint);
   margin-bottom: 24px;
+}
+
+/* Forced colors (e.g. Windows High Contrast) strip custom backgrounds, so
+   anything that only communicated state via `background: var(--accent)`
+   — the primary button and the active currency toggle — can disappear
+   into the surrounding surface. Give them an explicit border and rely on
+   system colors so the shapes and active state stay visible. */
+@media (forced-colors: active) {
+  button.primary {
+    border: 2px solid ButtonText;
+  }
+  .ctoggle {
+    border: 1px solid ButtonText;
+  }
+  .ctoggle.active {
+    border: 2px solid Highlight;
+    outline: 1px solid Highlight;
+  }
 }
 
 /* Amount hero (new) */
@@ -324,6 +380,10 @@ input.amount-input:focus {
   flex-wrap: wrap;
 }
 .chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   padding: 6px 14px;
   border-radius: 999px;
   border: 1px solid var(--border);
@@ -499,6 +559,10 @@ a.txlink {
 .nav a,
 .nav button {
   width: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   font-size: 13px;
   color: var(--text-lo);
   text-decoration: none;
@@ -506,7 +570,7 @@ a.txlink {
   border: none;
   cursor: pointer;
   font-family: inherit;
-  padding: 0;
+  padding: 10px 4px;
 }
 .nav a:hover,
 .nav button:hover {
@@ -648,6 +712,7 @@ a.txlink {
 .admin-shell {
   display: flex;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 .admin-sidebar {
   width: 220px;
@@ -720,6 +785,7 @@ a.txlink {
 }
 .admin-main {
   flex: 1;
+  min-width: 0;
   max-width: 960px;
   padding: 40px 44px;
 }
@@ -849,11 +915,18 @@ a.txlink {
 .admin-table button {
   width: auto;
   padding: 6px 14px;
+  min-height: 44px;
   font-size: 12.5px;
   margin: 0;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text-hi);
+}
+.admin-table td .button-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 .admin-table button:hover {
   border-color: var(--accent);
@@ -993,4 +1066,46 @@ a.txlink {
 .admin-status-row .mono {
   font-size: 14px;
   color: var(--text-hi);
+}
+
+/* Admin: narrow viewports — stack the sidebar above content and drop the
+   stat-grid column floor so nothing forces page-wide horizontal scroll. */
+@media (max-width: 768px) {
+  .admin-shell {
+    flex-direction: column;
+  }
+  .admin-sidebar {
+    width: 100%;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+  }
+  .admin-sidebar .brand {
+    margin-bottom: 16px;
+  }
+  .admin-sidebar-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .admin-sidebar-group {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+  }
+  .admin-sidebar-group-label {
+    display: none;
+  }
+  .admin-sidebar-footer {
+    margin-top: 12px;
+  }
+  .admin-main {
+    max-width: none;
+    padding: 20px;
+  }
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
 }

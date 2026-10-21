@@ -1,7 +1,9 @@
 "use client";
+import LoadingSpinner from "@/components/LoadingSpinner";
 
 import { useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { explorerUrl } from "@/lib/stellar-explorer";
 
 interface BlockchainStatus {
   network: string;
@@ -12,10 +14,6 @@ interface BlockchainStatus {
   };
   rpc: { reachable: boolean; latencyMs: number | null; latestLedger: number | null };
   contracts: { name: string; id: string }[];
-}
-
-function explorerUrl(id: string): string {
-  return `https://stellar.expert/explorer/testnet/contract/${id}`;
 }
 
 export default function AdminBlockchainPage() {
@@ -30,7 +28,7 @@ export default function AdminBlockchainPage() {
     })();
   }, []);
 
-  if (loading) return <div className="empty">Loading…</div>;
+  if (loading) return <LoadingSpinner />;
   if (!status) return <div className="empty">Could not load blockchain status.</div>;
 
   return (
@@ -56,7 +54,9 @@ export default function AdminBlockchainPage() {
             <div className={`stat-value ${status.rpc.reachable ? "stat-good" : "stat-bad"}`} style={{ fontSize: 20 }}>
               {status.rpc.reachable ? "reachable" : "unreachable"}
             </div>
-            {status.rpc.reachable && <div className="stat-sub">{status.rpc.latencyMs}ms</div>}
+            {status.rpc.reachable && status.rpc.latencyMs !== null && (
+              <div className="stat-sub">{status.rpc.latencyMs}ms</div>
+            )}
           </div>
           <div className="stat-card">
             <div className="stat-label">Latest ledger</div>
@@ -117,7 +117,7 @@ export default function AdminBlockchainPage() {
                 <tr key={c.id}>
                   <td style={{ color: "var(--text-hi)" }}>{c.name}</td>
                   <td className="mono">
-                    <a href={explorerUrl(c.id)} target="_blank" rel="noreferrer">
+                    <a href={explorerUrl(c.id, status.network)} target="_blank" rel="noreferrer">
                       {c.id}
                     </a>
                   </td>

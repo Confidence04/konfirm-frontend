@@ -1,7 +1,8 @@
 "use client";
+import LoadingSpinner from "@/components/LoadingSpinner";
 
 import { useEffect, useState } from "react";
-import { API_BASE } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 interface WalletRow {
   address: string;
@@ -18,17 +19,39 @@ const ROLE_LABELS: Record<string, string> = {
   blocked: "Blocked",
 };
 
+const PAGE_SIZE = 50;
+
 export default function AdminWalletsPage() {
   const [wallets, setWallets] = useState<WalletRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const res = await fetch(`${API_BASE}/admin/wallets`, { credentials: "include" });
-      if (res.ok) setWallets(await res.json());
+      const res = await fetch(`${API_BASE}/admin/wallets?limit=${PAGE_SIZE}&offset=0`, { credentials: "include" });
+      if (res.ok) {
+        const rows: WalletRow[] = await res.json();
+        setWallets(rows);
+        setOffset(rows.length);
+        setHasMore(rows.length === PAGE_SIZE);
+      }
       setLoading(false);
     })();
   }, []);
+
+  async function loadMore() {
+    setLoadingMore(true);
+    const res = await fetch(`${API_BASE}/admin/wallets?limit=${PAGE_SIZE}&offset=${offset}`, { credentials: "include" });
+    if (res.ok) {
+      const rows: WalletRow[] = await res.json();
+      setWallets((prev) => [...prev, ...rows]);
+      setOffset((prev) => prev + rows.length);
+      setHasMore(rows.length === PAGE_SIZE);
+    }
+    setLoadingMore(false);
+  }
 
   return (
     <div>
@@ -39,11 +62,17 @@ export default function AdminWalletsPage() {
       </p>
 
       {loading ? (
-        <div className="empty">Loading…</div>
+        <LoadingSpinner />
+      ) : error ? (
+        <div className="empty">Could not load wallets — try again.</div>
       ) : wallets.length === 0 ? (
         <div className="empty">No addresses seen yet.</div>
       ) : (
         <div className="admin-section">
+          <p className="hint">
+            Showing {wallets.length} of {hasMore ? "many" : wallets.length}
+            {hasMore ? " — there may be more rows." : ""}
+          </p>
           <div className="admin-table-wrap">
             <table className="admin-table">
               <thead>
@@ -68,6 +97,11 @@ export default function AdminWalletsPage() {
               </tbody>
             </table>
           </div>
+          {hasMore && (
+            <button className="btn" onClick={loadMore} disabled={loadingMore} style={{ marginTop: 12 }}>
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          )}
         </div>
       )}
     </div>

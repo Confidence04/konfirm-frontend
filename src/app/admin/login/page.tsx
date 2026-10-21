@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { API_BASE } from "@/lib/api";
+import { reportError } from "@/lib/report-error";
 
 export default function AdminLoginPage() {
   const router = useRouter();
@@ -28,7 +29,7 @@ export default function AdminLoginPage() {
       }
       router.push("/admin");
     } catch (err) {
-      console.error("[konfirm admin login]", err);
+      reportError("admin-login", err);
       setStatus(err instanceof Error ? err.message : "Could not log in. Please try again.");
       setSubmitting(false);
     }
@@ -47,7 +48,7 @@ export default function AdminLoginPage() {
             <input
               id="email"
               type="email"
-              autoComplete="email"
+              autoComplete="username"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
